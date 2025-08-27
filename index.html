@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hororová Discotéka</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Inter', sans-serif;
+            background-color: #000;
+        }
+
+        #game-container {
+            width: 100vw;
+            height: 100vh;
+            position: relative;
+        }
+
+        #ui-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            color: white;
+            text-shadow: 0 0 10px rgba(255, 0, 0, 0.5);
+            pointer-events: none; /* Aby sa UI neblokovalo, ale bolo nad plátnom */
+            z-index: 10;
+        }
+
+        #timer {
+            font-size: 5rem;
+            font-weight: bold;
+            display: none;
+            text-align: center;
+            text-shadow: 0 0 20px #ff00ff, 0 0 40px #00ffff;
+            animation: pulse-timer 1s infinite alternate;
+            padding: 10px 20px;
+            background: rgba(0, 0, 0, 0.5);
+            border-radius: 10px;
+        }
+
+        @keyframes pulse-timer {
+            from { transform: scale(1); }
+            to { transform: scale(1.05); }
+        }
+
+        #game-over-screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.95);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            text-align: center;
+            z-index: 20;
+        }
+
+        #game-over-screen h1 {
+            color: #ff0000;
+            font-size: 4rem;
+            margin-bottom: 20px;
+            text-shadow: 0 0 15px #ff0000;
+            animation: text-flicker 0.5s infinite alternate;
+        }
+
+        #game-over-screen p {
+            font-size: 1.5rem;
+            color: #aaa;
+            margin-bottom: 40px;
+        }
+
+        #jumpscare-button {
+            padding: 15px 30px;
+            font-size: 1.2rem;
+            background-color: #d11a2a;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            box-shadow: 0 5px 15px rgba(255, 0, 0, 0.5);
+            transition: transform 0.2s, box-shadow 0.2s;
+            text-transform: uppercase;
+        }
+
+        #jumpscare-button:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 8px 20px rgba(255, 0, 0, 0.8);
+        }
+
+        #jumpscare-image {
+            width: 90%;
+            max-width: 800px;
+            display: none;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 25;
+            animation: jumpscare-pulse 0.2s forwards;
+        }
+
+        @keyframes jumpscare-pulse {
+            from { transform: translate(-50%, -50%) scale(0.8); opacity: 0; }
+            to { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+        }
+
+        @keyframes text-flicker {
+            from { opacity: 1; }
+            to { opacity: 0.8; }
+        }
+
+        .hide {
+            display: none !important;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <div id="ui-overlay">
+        <div id="timer"></div>
+    </div>
+    <div id="game-over-screen">
+        <h1>GAME OVER</h1>
+        <p>Monštrum vás dostalo...</p>
+        <button id="jumpscare-button">Zobraziť Jumpscare znova</button>
+    </div>
+    <img id="jumpscare-image" src="https://placehold.co/800x600/000000/FFFFFF.png?text=Desiv%C3%A9+Monštrum" alt="Desivé monštrum">
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cannon.js/0.6.2/cannon.min.js"></script>
+<script>
+    window.onload = function() {
+        // --- Globálne premenné ---
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.getElementById('game-container').appendChild(renderer.domElement);
+
+        // --- Fyzikálny svet (Cannon.js) ---
+        const world = new CANNON.World();
+        world.gravity.set(0, 0, 0); // Vytvorenie 0 gravitácie, keďže je to horor
+        const physicsMaterial = new CANNON.Material("pMat");
+        const physicsContactMaterial = new CANNON.ContactMaterial(physicsMaterial, physicsMaterial, { friction: 0.1, restitution: 0.9 });
+        world.addContactMaterial(physicsContactMaterial);
+
+        // --- Stav hry ---
+        let isGameOver = false;
+        let chaseActive = false;
+        let timeLeft = 60; // Pôvodný čas 60 sekúnd
+        const timerUI = document.getElementById('timer');
+        const gameOverScreen = document.getElementById('game-over-screen');
+        const jumpscareButton = document.getElementById('jumpscare-button');
+        const jumpscareImage = document.getElementById('jumpscare-image');
+
+        // --- Objekty a osvetlenie ---
+        let playerMesh, monsterMesh;
+        let playerBody, monsterBody;
+        const discoLights = [];
+        const discoPeople = [];
+        const scarySounds = {
+            revy: new Audio('https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3'), // Placeholder URL
+            krikanie: new Audio('https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3') // Placeholder URL
+        };
+        const jumpscareSound = new Audio('https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3'); // Placeholder URL
+
+        // --- Fáza 1: Nastavenie Discotéky a Hráča ---
+        function setupScene() {
+            // Disco podlaha
+            const floorGeometry = new THREE.BoxGeometry(20, 0.1, 20);
+            const floorMaterial = new THREE.MeshPhongMaterial({ color: 0x333333 });
+            const floorMesh = new THREE.Mesh(floorGeometry, floorMaterial);
+            scene.add(floorMesh);
+            const floorBody = new CANNON.Body({ mass: 0, shape: new CANNON.Plane(), material: physicsMaterial });
+            floorBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+            world.addBody(floorBody);
+
+            // Steny
+            const walls = [
+                { x: 10, y: 5, z: 0, w: 20, h: 10, d: 0.1, rotY: Math.PI / 2 },
+                { x: -10, y: 5, z: 0, w: 20, h: 10, d: 0.1, rotY: Math.PI / 2 },
+                { x: 0, y: 5, z: 10, w: 20, h: 10, d: 0.1, rotY: 0 },
+                { x: 0, y: 5, z: -10, w: 20, h: 10, d: 0.1, rotY: 0 }
+            ];
+            walls.forEach(wall => {
+                const geometry = new THREE.BoxGeometry(wall.w, wall.h, wall.d);
+                const material = new THREE.MeshPhongMaterial({ color: 0x222222 });
+                const mesh = new THREE.Mesh(geometry, material);
+                mesh.position.set(wall.x, wall.y, wall.z);
+                mesh.rotation.y = wall.rotY;
+                scene.add(mesh);
+                const body = new CANNON.Body({ mass: 0, shape: new CANNON.Box(new CANNON.Vec3(wall.w / 2, wall.h / 2, wall.d / 2)), material: physicsMaterial });
+                body.position.set(wall.x, wall.y, wall.z);
+                body.quaternion.setFromEuler(0, wall.rotY, 0);
+                world.addBody(body);
+            });
+
+            // Disko svetlá
+            for (let i = 0; i < 5; i++) {
+                const light = new THREE.PointLight(Math.random() * 0xffffff, 1, 15);
+                light.position.set(Math.random() * 15 - 7.5, 9, Math.random() * 15 - 7.5);
+                scene.add(light);
+                discoLights.push(light);
+            }
+
+            // Disco dav (jednoduché kocky)
+            for (let i = 0; i < 50; i++) {
+                const geometry = new THREE.BoxGeometry(0.5, 2, 0.5);
+                const material = new THREE.MeshPhongMaterial({ color: 0x555555 });
+                const mesh = new THREE.Mesh(geometry, material);
+                mesh.position.set(Math.random() * 18 - 9, 1, Math.random() * 18 - 9);
+                scene.add(mesh);
+                discoPeople.push(mesh);
+            }
+
+            // Hráč
+            const playerGeometry = new THREE.SphereGeometry(0.5);
+            const playerMaterial = new THREE.MeshPhongMaterial({ color: 0x00ff00, transparent: true, opacity: 0 }); // Neviditeľný pre hru
+            playerMesh = new THREE.Mesh(playerGeometry, playerMaterial);
+            playerMesh.position.y = 1;
+            scene.add(playerMesh);
+
+            playerBody = new CANNON.Body({ mass: 1, shape: new CANNON.Sphere(0.5), position: new CANNON.Vec3(0, 1, 0) });
+            world.addBody(playerBody);
+
+            camera.position.set(0, 1, 5);
+        }
+
+        // --- Fáza 2: Odpočítavanie ---
+        let countdownInterval;
+        function startCountdown() {
+            timerUI.style.display = 'block';
+            countdownInterval = setInterval(() => {
+                if (timeLeft > 0) {
+                    timeLeft--;
+                    timerUI.textContent = timeLeft;
+                    // Blikanie disko svetiel
+                    discoLights.forEach(light => {
+                        light.intensity = Math.random() * 2;
+                    });
+                } else {
+                    clearInterval(countdownInterval);
+                    timerUI.style.display = 'none';
+                    lightsOut();
+                }
+            }, 1000);
+        }
+
+        // --- Fáza 3: Zhasnutie svetiel a Začiatok prenasledovania ---
+        function lightsOut() {
+            // Odstránenie svetiel
+            discoLights.forEach(light => { scene.remove(light); });
+
+            // Odstránenie "ľudí"
+            discoPeople.forEach(person => { scene.remove(person); });
+
+            // Zmena farby scény na úplnú tmu
+            renderer.setClearColor(0x000000);
+
+            // Pridanie jemného ambientného svetla
+            const ambientLight = new THREE.AmbientLight(0x444444);
+            scene.add(ambientLight);
+
+            // Spustenie desivých zvukov
+            scarySounds.revy.loop = true;
+            scarySounds.krikanie.loop = true;
+            scarySounds.revy.play();
+            scarySounds.krikanie.play();
+
+            // Vytvorenie a zobrazenie monštra
+            createMonster();
+            chaseActive = true;
+        }
+
+        function createMonster() {
+            // Jednoduchý monster model: tmavá guľa
+            const monsterGeometry = new THREE.SphereGeometry(1.5, 32, 32);
+            const monsterMaterial = new THREE.MeshPhongMaterial({ color: 0x000000 });
+            monsterMesh = new THREE.Mesh(monsterGeometry, monsterMaterial);
+            monsterMesh.position.set(5, 1.5, -5);
+            scene.add(monsterMesh);
+
+            monsterBody = new CANNON.Body({ mass: 5, shape: new CANNON.Sphere(1.5), position: new CANNON.Vec3(5, 1.5, -5) });
+            world.addBody(monsterBody);
+
+            // Svietiace oči
+            const eyeLight1 = new THREE.PointLight(0xff0000, 50, 10);
+            eyeLight1.position.set(-0.5, 0.5, 1.5);
+            monsterMesh.add(eyeLight1);
+            const eyeLight2 = new THREE.PointLight(0xff0000, 50, 10);
+            eyeLight2.position.set(0.5, 0.5, 1.5);
+            monsterMesh.add(eyeLight2);
+        }
+
+        // --- Hráčske ovládanie ---
+        const moveVector = new THREE.Vector3(0, 0, 0);
+        const keyState = {};
+        document.addEventListener('keydown', (event) => { keyState[event.code] = true; });
+        document.addEventListener('keyup', (event) => { keyState[event.code] = false; });
+
+        // Vektor pre pohyb vpred/vzad a do strán
+        const forwardVector = new THREE.Vector3();
+        const sideVector = new THREE.Vector3();
+
+        // --- Ovládanie myši pre otáčanie kamery ---
+        let isMouseDown = false;
+        let prevMouseX = 0;
+        let prevMouseY = 0;
+
+        document.addEventListener('mousedown', (event) => {
+            if (event.button === 0) { // Ľavé tlačidlo myši
+                isMouseDown = true;
+                prevMouseX = event.clientX;
+                prevMouseY = event.clientY;
+            }
+        });
+
+        document.addEventListener('mouseup', (event) => {
+            if (event.button === 0) {
+                isMouseDown = false;
+            }
+        });
+
+        document.addEventListener('mousemove', (event) => {
+            if (isMouseDown) {
+                const deltaX = event.clientX - prevMouseX;
+                const deltaY = event.clientY - prevMouseY;
+
+                // Otáčanie kamery
+                camera.rotation.y -= deltaX * 0.002;
+                camera.rotation.x -= deltaY * 0.002;
+
+                // Obmedzenie vertikálneho otáčania, aby sa kamera neotočila príliš
+                camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, camera.rotation.x));
+
+                prevMouseX = event.clientX;
+                prevMouseY = event.clientY;
+            }
+        });
+
+
+        function handleInput() {
+            // Získanie smeru, ktorým sa pozerá kamera
+            camera.getWorldDirection(forwardVector);
+            forwardVector.y = 0; // Odstránenie vertikálnej zložky
+            forwardVector.normalize();
+
+            // Získanie smeru do strán (kolmo na smer vpred)
+            sideVector.crossVectors(forwardVector, camera.up);
+
+            // Výpočet pohybu na základe stlačených kláves
+            const velocity = new THREE.Vector3(0, 0, 0);
+
+            if (keyState['KeyW'] || keyState['ArrowUp']) {
+                velocity.add(forwardVector);
+            }
+            if (keyState['KeyS'] || keyState['ArrowDown']) {
+                velocity.sub(forwardVector);
+            }
+            if (keyState['KeyA'] || keyState['ArrowLeft']) {
+                velocity.sub(sideVector);
+            }
+            if (keyState['KeyD'] || keyState['ArrowRight']) {
+                velocity.add(sideVector);
+            }
+
+            // Nastavenie rýchlosti fyzikálneho tela
+            if (velocity.length() > 0) {
+                velocity.normalize().multiplyScalar(5); // Rýchlosť pohybu
+                playerBody.velocity.set(velocity.x, playerBody.velocity.y, velocity.z);
+            } else {
+                playerBody.velocity.set(0, playerBody.velocity.y, 0);
+            }
+        }
+
+        // --- Hra (game loop) a Animácia ---
+        const clock = new THREE.Clock();
+        function animate() {
+            if (isGameOver) {
+                renderer.render(scene, camera);
+                return;
+            }
+
+            const deltaTime = clock.getDelta();
+            world.step(1 / 60, deltaTime, 3);
+
+            // Aktualizácia pozícií pre 3D modely
+            playerMesh.position.copy(playerBody.position);
+            camera.position.copy(playerBody.position);
+
+            if (chaseActive && monsterMesh) {
+                // Monštrum prenasleduje hráča
+                const monsterDir = new CANNON.Vec3();
+                playerBody.position.vsub(monsterBody.position, monsterDir);
+                monsterDir.normalize();
+                monsterBody.velocity.set(monsterDir.x * 2, 0, monsterDir.z * 2);
+
+                // Kontrola pre jumpscare
+                const distance = monsterMesh.position.distanceTo(playerMesh.position);
+                if (distance < 2.5) {
+                    triggerJumpscare();
+                }
+
+                // Rotácia monštra, aby sa dívalo na hráča
+                monsterMesh.lookAt(playerMesh.position);
+                monsterMesh.rotation.x = 0; // Zabraňuje nakloneniu monštra
+            }
+
+            handleInput();
+            renderer.render(scene, camera);
+            requestAnimationFrame(animate);
+        }
+
+        // --- Koniec Hry a Jumpscare ---
+        function triggerJumpscare() {
+            isGameOver = true;
+            chaseActive = false;
+            scarySounds.revy.pause();
+            scarySounds.krikanie.pause();
+            jumpscareSound.play();
+
+            // Zobrazenie Jumpscare obrázka
+            jumpscareImage.style.display = 'block';
+            setTimeout(() => {
+                jumpscareImage.style.display = 'none';
+                gameOverScreen.style.display = 'flex';
+            }, 1000); // Trvanie jumpscare scény
+        }
+
+        // Ovládanie tlačidla na Jumpscare
+        jumpscareButton.addEventListener('click', () => {
+            jumpscareImage.style.display = 'block';
+            jumpscareSound.currentTime = 0;
+            jumpscareSound.play();
+            setTimeout(() => {
+                jumpscareImage.style.display = 'none';
+            }, 1000);
+        });
+
+        // --- Inicializácia Hry ---
+        function initGame() {
+            setupScene();
+            startCountdown();
+            animate();
+        }
+
+        initGame();
+
+        // Responzívny dizajn
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    };
+</script>
+
+</body>
+</html>
